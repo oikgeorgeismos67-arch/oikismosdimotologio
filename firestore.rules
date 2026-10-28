@@ -1,0 +1,58 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && request.auth.token.admin == true; }
+    function isApprovedCitizen() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'citizen'
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'approved';
+    }
+
+    // Profile records contain only account/workflow metadata, never full civil-register data.
+    match /users/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+      allow create, update, delete: if false; // Functions/Admin SDK only.
+    }
+
+    // Official register records: no citizen direct access. Prefer minimum necessary fields.
+    match /citizens/{citizenId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /requests/{requestId} {
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.citizenUid == request.auth.uid);
+      allow create: if isApprovedCitizen()
+        && request.resource.data.keys().hasOnly([
+          'citizenUid', 'type', 'description', 'status', 'createdAt',
+          'updatedAt', 'attachmentPaths'
+        ])
+        && request.resource.data.citizenUid == request.auth.uid
+        && request.resource.data.type is string
+        && request.resource.data.type.size() > 0
+        && request.resource.data.type.size() <= 120
+        && request.resource.data.description is string
+        && request.resource.data.description.size() > 0
+        && request.resource.data.description.size() <= 5000
+        && request.resource.data.status == 'submitted'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && (!('attachmentPaths' in request.resource.data)
+          || (request.resource.data.attachmentPaths is list
+            && request.resource.data.attachmentPaths.size() <= 5));
+      // Citizens cannot change request status or edit submitted requests.
+      allow update, delete: if isAdmin();
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create, update, delete: if false; // Admin SDK only.
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
